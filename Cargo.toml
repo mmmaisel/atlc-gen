@@ -1,0 +1,9 @@
+[package]
+name = "atlc-gen"
+version = "0.1.0"
+authors = ["max"]
+edition = "2018"
+
+[dependencies]
+bmp = "*"
+clap = "*"
