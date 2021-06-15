@@ -5,7 +5,13 @@ use bmp::{Image, Pixel};
 use clap::{App, Arg};
 
 #[derive(Debug)]
-struct PcbSetup {
+enum PcbSetup {
+    Coplanar(CoplanarSetup),
+    Via(ViaSetup),
+}
+
+#[derive(Debug)]
+struct CoplanarSetup {
     res_x: u32,
     res_y: u32,
     core_thickness: u32,
@@ -19,10 +25,142 @@ struct PcbSetup {
     filename: String,
 }
 
+#[derive(Debug)]
+struct ViaSetup {
+    res_x: u32,
+    res_y: u32,
+    inner_width: u32,
+    outer_width: u32,
+    inner_space: u32,
+    outer_space: u32,
+    filename: String,
+}
+
+const AIR_COLOR: Pixel = Pixel {
+    r: 255,
+    g: 202,
+    b: 202,
+};
+const FR4_COLOR: Pixel = Pixel {
+    r: 223,
+    g: 247,
+    b: 136,
+};
+const POS_COLOR: Pixel = Pixel { r: 255, g: 0, b: 0 };
+const NEG_COLOR: Pixel = Pixel { r: 0, g: 0, b: 255 };
+const GND_COLOR: Pixel = Pixel { r: 0, g: 255, b: 0 };
+const SMK_COLOR: Pixel = Pixel {
+    r: 25,
+    g: 186,
+    b: 246,
+};
+
+fn draw_circle(
+    img: &mut Image,
+    color: Pixel,
+    x_pos: u32,
+    y_pos: u32,
+    radius: u32,
+) {
+    let x_pos = x_pos as i32;
+    let y_pos = y_pos as i32;
+    let radius = radius as i32;
+
+    let mut err: i32 = 1 - radius as i32;
+    let mut dx: i32 = 0;
+    let mut dy: i32 = -2 * radius as i32;
+    let mut x: i32 = 1;
+    let mut y: i32 = radius as i32;
+
+    img.set_pixel((x_pos + radius) as u32, y_pos as u32, color);
+    img.set_pixel((x_pos - radius) as u32, y_pos as u32, color);
+    img.set_pixel(x_pos as u32, (y_pos + radius) as u32, color);
+    img.set_pixel(x_pos as u32, (y_pos - radius) as u32, color);
+    fill_column(
+        img,
+        color,
+        x_pos as u32,
+        (y_pos - radius + 1) as u32,
+        (y_pos + radius) as u32,
+    );
+
+    while x < y {
+        if err >= 0 {
+            y -= 1;
+            dy += 2;
+            err += dy;
+        }
+        dx += 2;
+        err += dx + 1;
+
+        img.set_pixel((x_pos + x) as u32, (y_pos + y) as u32, color);
+        img.set_pixel((x_pos - x) as u32, (y_pos + y) as u32, color);
+        img.set_pixel((x_pos + x) as u32, (y_pos - y) as u32, color);
+        img.set_pixel((x_pos - x) as u32, (y_pos - y) as u32, color);
+        img.set_pixel((x_pos + y) as u32, (y_pos + x) as u32, color);
+        img.set_pixel((x_pos - y) as u32, (y_pos + x) as u32, color);
+        img.set_pixel((x_pos + y) as u32, (y_pos - x) as u32, color);
+        img.set_pixel((x_pos - y) as u32, (y_pos - x) as u32, color);
+        fill_column(
+            img,
+            color,
+            (x_pos + x) as u32,
+            (y_pos - y + 1) as u32,
+            (y_pos + y) as u32,
+        );
+        fill_column(
+            img,
+            color,
+            (x_pos + y) as u32,
+            (y_pos - x + 1) as u32,
+            (y_pos + x) as u32,
+        );
+        fill_column(
+            img,
+            color,
+            (x_pos - x) as u32,
+            (y_pos - y + 1) as u32,
+            (y_pos + y) as u32,
+        );
+        fill_column(
+            img,
+            color,
+            (x_pos - y) as u32,
+            (y_pos - x + 1) as u32,
+            (y_pos + x) as u32,
+        );
+        x += 1;
+    }
+}
+
+fn fill_column(
+    img: &mut Image,
+    color: Pixel,
+    x: u32,
+    y_start: u32,
+    y_end: u32,
+) {
+    for y in y_start..y_end {
+        img.set_pixel(x, y, color);
+    }
+}
+
 impl PcbSetup {
     fn from_args() -> PcbSetup {
         let matches = App::new("atlc-gen")
             .version("0.1")
+            .arg(
+                Arg::with_name("Coplanar Setup")
+                    .long("--coplanar")
+                    .conflicts_with("Via Setup")
+                    .required_unless("Via Setup"),
+            )
+            .arg(
+                Arg::with_name("Via Setup")
+                    .long("--via")
+                    .conflicts_with("Coplanar Setup")
+                    .required_unless("Coplanar Setup"),
+            )
             .arg(
                 Arg::with_name("resolution")
                     .short("r")
@@ -68,9 +206,9 @@ impl PcbSetup {
                     .takes_value(true),
             )
             .arg(
-                Arg::with_name("via-fence-thickness")
+                Arg::with_name("via-thickness")
                     .short("V")
-                    .long("via-fence-thickness")
+                    .long("via-thickness")
                     .takes_value(true),
             )
             .arg(
@@ -127,62 +265,57 @@ impl PcbSetup {
             Some(x) => x.parse().unwrap(),
             None => 200,
         };
-        let via_fence_thickness: u32 =
-            match matches.value_of("via-fence-thickness") {
-                Some(x) => x.parse().unwrap(),
-                None => 300,
-            };
+        let via_thickness: u32 = match matches.value_of("via-thickness") {
+            Some(x) => x.parse().unwrap(),
+            None => 300,
+        };
         let filename: String = match matches.value_of("out-filename") {
             Some(x) => x.to_string(),
             None => "atlc-gen.bmp".to_string(),
         };
 
-        return PcbSetup {
-            res_x: res_x / resolution,
-            res_y: res_y / resolution,
-            core_thickness: core_thickness / resolution,
-            cu_thickness: cu_thickness / resolution,
-            sm_thickness: sm_thickness / resolution,
-            trace_width: trace_width / resolution,
-            outer_space: outer_space / resolution,
-            inner_space: inner_space / resolution,
-            via_fence_dist: via_fence_dist / resolution,
-            via_fence_thickness: via_fence_thickness / resolution,
-            filename: filename,
-        };
+        if matches.is_present("Coplanar Setup") {
+            return PcbSetup::Coplanar(CoplanarSetup {
+                res_x: res_x / resolution,
+                res_y: res_y / resolution,
+                core_thickness: core_thickness / resolution,
+                cu_thickness: cu_thickness / resolution,
+                sm_thickness: sm_thickness / resolution,
+                trace_width: trace_width / resolution,
+                outer_space: outer_space / resolution,
+                inner_space: inner_space / resolution,
+                via_fence_dist: via_fence_dist / resolution,
+                via_fence_thickness: via_thickness / resolution,
+                filename: filename,
+            });
+        } else if matches.is_present("Via Setup") {
+            return PcbSetup::Via(ViaSetup {
+                res_x: res_x / resolution,
+                res_y: res_y / resolution,
+                inner_width: trace_width / resolution,
+                outer_width: via_thickness / resolution,
+                outer_space: outer_space / resolution,
+                inner_space: inner_space / resolution,
+                filename: filename,
+            });
+        }
+        panic!("Can never happen");
     }
+}
 
-    const AIR_COLOR: Pixel = Pixel {
-        r: 255,
-        g: 202,
-        b: 202,
-    };
-    const FR4_COLOR: Pixel = Pixel {
-        r: 223,
-        g: 247,
-        b: 136,
-    };
-    const POS_COLOR: Pixel = Pixel { r: 255, g: 0, b: 0 };
-    const NEG_COLOR: Pixel = Pixel { r: 0, g: 0, b: 255 };
-    const GND_COLOR: Pixel = Pixel { r: 0, g: 255, b: 0 };
-    const SMK_COLOR: Pixel = Pixel {
-        r: 25,
-        g: 186,
-        b: 246,
-    };
-
+impl CoplanarSetup {
     fn to_bitmap(&self) -> Image {
         let mut img = Image::new(self.res_x, self.res_y);
 
         // Fill with air.
         for (x, y) in img.coordinates() {
-            img.set_pixel(x, y, PcbSetup::AIR_COLOR);
+            img.set_pixel(x, y, AIR_COLOR);
         }
 
         // Groundplane
         for x in 0..self.res_x {
             for y in 0..self.cu_thickness {
-                img.set_pixel(x, self.res_y - 1 - y, PcbSetup::GND_COLOR);
+                img.set_pixel(x, self.res_y - 1 - y, GND_COLOR);
             }
         }
 
@@ -200,9 +333,9 @@ impl PcbSetup {
         for y in self.cu_thickness..self.cu_thickness + self.core_thickness {
             for x in 0..self.res_x {
                 if fence_range1.contains(&x) || fence_range2.contains(&x) {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::GND_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, GND_COLOR);
                 } else {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::FR4_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, FR4_COLOR);
                 }
             }
         }
@@ -212,28 +345,28 @@ impl PcbSetup {
             ..2 * self.cu_thickness + self.core_thickness
         {
             for x in 0..(self.res_x - top_gnd_spacing) / 2 {
-                img.set_pixel(x, self.res_y - 1 - y, PcbSetup::GND_COLOR);
+                img.set_pixel(x, self.res_y - 1 - y, GND_COLOR);
             }
             for x in (self.res_x + top_gnd_spacing) / 2..self.res_x {
-                img.set_pixel(x, self.res_y - 1 - y, PcbSetup::GND_COLOR);
+                img.set_pixel(x, self.res_y - 1 - y, GND_COLOR);
             }
 
             if self.inner_space == 0 {
                 for x in (self.res_x - self.trace_width) / 2
                     ..(self.res_x + self.trace_width) / 2
                 {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::POS_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, POS_COLOR);
                 }
             } else {
                 for x in (self.res_x - self.inner_space) / 2 - self.trace_width
                     ..(self.res_x - self.inner_space) / 2
                 {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::NEG_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, NEG_COLOR);
                 }
                 for x in (self.res_x + self.inner_space) / 2
                     ..(self.res_x + self.inner_space) / 2 + self.trace_width
                 {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::POS_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, POS_COLOR);
                 }
             }
         }
@@ -251,17 +384,140 @@ impl PcbSetup {
                         if (0..self.res_x).contains(&xd)
                             && (0..self.res_y).contains(&yd)
                         {
-                            return img.get_pixel(xd, yd) != PcbSetup::AIR_COLOR
-                                && img.get_pixel(xd, yd) != PcbSetup::SMK_COLOR
+                            return img.get_pixel(xd, yd) != AIR_COLOR
+                                && img.get_pixel(xd, yd) != SMK_COLOR
                                 && img.get_pixel(x, self.res_y - 1 - y)
-                                    == PcbSetup::AIR_COLOR;
+                                    == AIR_COLOR;
                         }
                         return false;
                     })
                 {
-                    img.set_pixel(x, self.res_y - 1 - y, PcbSetup::SMK_COLOR);
+                    img.set_pixel(x, self.res_y - 1 - y, SMK_COLOR);
                 }
             }
+        }
+
+        return img;
+    }
+}
+
+impl ViaSetup {
+    fn to_bitmap(&self) -> Image {
+        let mut img = Image::new(self.res_x, self.res_y);
+
+        // Fill with FR4.
+        for (x, y) in img.coordinates() {
+            img.set_pixel(x, y, FR4_COLOR);
+        }
+
+        let center_x = self.res_x / 2;
+        let center_y = self.res_y / 2;
+        let conductor_pos = self.inner_space / 2 + self.inner_width / 2;
+
+        // Conductors
+        if self.inner_space == 0 {
+            draw_circle(
+                &mut img,
+                POS_COLOR,
+                center_x,
+                center_y,
+                self.inner_width / 2,
+            );
+        } else {
+            draw_circle(
+                &mut img,
+                POS_COLOR,
+                center_x + conductor_pos,
+                center_y,
+                self.inner_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                NEG_COLOR,
+                center_x - conductor_pos,
+                center_y,
+                self.inner_width / 2,
+            );
+        }
+
+        // GND vias
+        if self.inner_space == 0 {
+            let offset =
+                (1.0 / 2_f32.sqrt() * self.outer_space as f32).round() as u32;
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x + conductor_pos + offset,
+                center_y + offset,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x - conductor_pos - offset,
+                center_y + offset,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x + conductor_pos + offset,
+                center_y - offset,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x - conductor_pos - offset,
+                center_y - offset,
+                self.outer_width / 2,
+            );
+        } else {
+            let offset_x = self.outer_space / 2;
+            let offset_y =
+                ((self.outer_space / 2) as f32 * 3_f32.sqrt()).round() as u32;
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x + conductor_pos + self.outer_space,
+                center_y,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x - conductor_pos - self.outer_space,
+                center_y,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x + conductor_pos + offset_x,
+                center_y + offset_y,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x - conductor_pos - offset_x,
+                center_y + offset_y,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x + conductor_pos + offset_x,
+                center_y - offset_y,
+                self.outer_width / 2,
+            );
+            draw_circle(
+                &mut img,
+                GND_COLOR,
+                center_x - conductor_pos - offset_x,
+                center_y - offset_y,
+                self.outer_width / 2,
+            );
         }
 
         return img;
@@ -271,6 +527,14 @@ impl PcbSetup {
 fn main() {
     let settings = PcbSetup::from_args();
     println!("Generating atlc bitmat with {:?}", settings);
-    let bitmap = settings.to_bitmap();
-    bitmap.save(settings.filename).unwrap();
+    match settings {
+        PcbSetup::Coplanar(settings) => {
+            let bitmap = settings.to_bitmap();
+            bitmap.save(settings.filename).unwrap();
+        }
+        PcbSetup::Via(settings) => {
+            let bitmap = settings.to_bitmap();
+            bitmap.save(settings.filename).unwrap();
+        }
+    }
 }
