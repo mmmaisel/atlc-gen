@@ -95,7 +95,7 @@ impl PcbSetup {
             Some(x) => x.parse().unwrap(),
             None => 10000,
         };
-        let res_y: u32 = match matches.value_of("resolution") {
+        let res_y: u32 = match matches.value_of("res_y") {
             Some(x) => x.parse().unwrap(),
             None => 7500,
         };
